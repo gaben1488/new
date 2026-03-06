@@ -1,0 +1,330 @@
+diff --git a/ui.html b/ui.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef05469c490300664982d2f7aac17620111ec71e
+--- /dev/null
++++ b/ui.html
+@@ -0,0 +1,324 @@
++<!doctype html>
++<html lang="ru">
++<head>
++  <meta charset="utf-8" />
++  <meta name="viewport" content="width=device-width, initial-scale=1" />
++  <title>Org Structure Diff Builder</title>
++  <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
++  <style>
++    :root {
++      --bg: #f7f8fa;
++      --panel: #ffffff;
++      --text: #111827;
++      --muted: #6b7280;
++      --line: #e5e7eb;
++      --primary: #2563eb;
++      --primary-hover: #1d4ed8;
++      --danger: #dc2626;
++      --ok: #059669;
++    }
++    * { box-sizing: border-box; }
++    body {
++      margin: 0;
++      font: 13px/1.4 Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
++      color: var(--text);
++      background: var(--bg);
++      padding: 16px;
++    }
++    .card {
++      background: var(--panel);
++      border: 1px solid var(--line);
++      border-radius: 10px;
++      padding: 14px;
++      box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
++    }
++    h1 {
++      margin: 0 0 8px;
++      font-size: 15px;
++      line-height: 1.3;
++    }
++    .hint {
++      color: var(--muted);
++      margin-bottom: 14px;
++    }
++    .field { margin-bottom: 10px; }
++    .label {
++      font-weight: 600;
++      margin-bottom: 6px;
++      display: block;
++    }
++    input[type=file] {
++      display: block;
++      width: 100%;
++      border: 1px solid var(--line);
++      border-radius: 8px;
++      background: #fff;
++      padding: 8px;
++    }
++    .row {
++      display: flex;
++      gap: 8px;
++      align-items: center;
++      margin-top: 14px;
++    }
++    button {
++      border: 0;
++      border-radius: 8px;
++      padding: 10px 14px;
++      cursor: pointer;
++      font-weight: 600;
++    }
++    #buildBtn {
++      background: var(--primary);
++      color: #fff;
++      flex: 1;
++    }
++    #buildBtn:hover { background: var(--primary-hover); }
++    #buildBtn:disabled {
++      background: #9ca3af;
++      cursor: not-allowed;
++    }
++    #cancelBtn {
++      background: #fff;
++      color: #111827;
++      border: 1px solid var(--line);
++    }
++    #status {
++      margin-top: 10px;
++      min-height: 18px;
++      font-size: 12px;
++      color: var(--muted);
++    }
++    .error { color: var(--danger) !important; }
++    .ok { color: var(--ok) !important; }
++  </style>
++</head>
++<body>
++  <div class="card">
++    <h1>Построение оргструктуры по двум Excel</h1>
++    <div class="hint">Загрузите текущую и будущую штатные структуры (xlsx), затем нажмите «Построить».</div>
++
++    <div class="field">
++      <label class="label" for="currentFile">Текущая структура (1.xlsx)</label>
++      <input id="currentFile" type="file" accept=".xlsx,.xls" />
++    </div>
++
++    <div class="field">
++      <label class="label" for="futureFile">Будущая структура (2.xlsx)</label>
++      <input id="futureFile" type="file" accept=".xlsx,.xls" />
++    </div>
++
++    <div class="row">
++      <button id="buildBtn">Построить</button>
++      <button id="cancelBtn" type="button">Закрыть</button>
++    </div>
++
++    <div id="status">Ожидание файлов…</div>
++  </div>
++
++  <script>
++    const currentInput = document.getElementById('currentFile');
++    const futureInput = document.getElementById('futureFile');
++    const buildBtn = document.getElementById('buildBtn');
++    const cancelBtn = document.getElementById('cancelBtn');
++    const statusEl = document.getElementById('status');
++
++    const HEADER_SYNONYMS = {
++      department: ['отдел', 'подразделение', 'структурное подразделение', 'управление', 'департамент', 'служба'],
++      role: ['должность', 'позиция', 'штатная единица', 'наименование должности', 'должн'],
++      person: ['фио', 'сотрудник', 'работник', 'фамилия имя отчество', 'ф.и.о'],
++      rate: ['ставка', 'доля ставки', 'кол-во ставок', 'единиц', 'объем ставки', 'нагрузка'],
++      note: ['примечание', 'комментарий', 'особые отметки', 'пояснение']
++    };
++
++    function setStatus(text, cls) {
++      statusEl.textContent = text;
++      statusEl.className = cls || '';
++    }
++
++    function normalizeText(v) {
++      return (v == null ? '' : String(v)).trim();
++    }
++
++    function toComparableHeader(v) {
++      return normalizeText(v).toLowerCase().replace(/\s+/g, ' ').replace(/[.:;]/g, '');
++    }
++
++    function parseRate(raw) {
++      const value = normalizeText(raw);
++      if (!value) return 0;
++      const normalized = value.replace(',', '.').replace(/[^0-9.]/g, '');
++      const num = Number(normalized);
++      return Number.isFinite(num) ? num : 0;
++    }
++
++    function parseFlags(note, role) {
++      const text = (normalizeText(note) + ' ' + normalizeText(role)).toLowerCase();
++      return {
++        maternity: /декрет|д\/?о|по уходу/.test(text),
++        replacement: /замеща|исполняет|врио/.test(text),
++        combine: /совмещ|совмещение/.test(text),
++        deputy: /зам\.|заместител/.test(text),
++        distributedRate: /распределен|распределено|между/.test(text),
++        our: /оур/.test(text)
++      };
++    }
++
++    function extractSheetRows(sheet) {
++      const ref = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
++      const rows = Array.from({ length: ref.e.r + 1 }, () => Array(ref.e.c + 1).fill(''));
++
++      Object.keys(sheet).forEach((addr) => {
++        if (addr[0] === '!') return;
++        const cell = sheet[addr];
++        const p = XLSX.utils.decode_cell(addr);
++        rows[p.r][p.c] = cell && cell.v != null ? cell.v : '';
++      });
++
++      const merges = sheet['!merges'] || [];
++      for (const m of merges) {
++        const topLeft = rows[m.s.r] && rows[m.s.r][m.s.c] != null ? rows[m.s.r][m.s.c] : '';
++        for (let r = m.s.r; r <= m.e.r; r++) {
++          for (let c = m.s.c; c <= m.e.c; c++) {
++            if (!normalizeText(rows[r][c])) rows[r][c] = topLeft;
++          }
++        }
++      }
++
++      return rows;
++    }
++
++    function scoreHeader(header, canonical) {
++      const variants = HEADER_SYNONYMS[canonical] || [];
++      for (let i = 0; i < variants.length; i++) {
++        if (header.includes(variants[i])) return 100 - i;
++      }
++      return -1;
++    }
++
++    function findHeaderRow(rows) {
++      const maxScan = Math.min(rows.length, 20);
++      let best = { row: -1, score: -1, map: {} };
++
++      for (let r = 0; r < maxScan; r++) {
++        const line = rows[r].map((x) => toComparableHeader(x));
++        const map = {};
++        let score = 0;
++
++        ['department', 'role', 'person', 'rate', 'note'].forEach((key) => {
++          let bestIdx = -1;
++          let bestKeyScore = -1;
++          for (let c = 0; c < line.length; c++) {
++            const s = scoreHeader(line[c], key);
++            if (s > bestKeyScore) {
++              bestKeyScore = s;
++              bestIdx = c;
++            }
++          }
++          if (bestIdx >= 0 && bestKeyScore >= 0) {
++            map[key] = bestIdx;
++            score += bestKeyScore;
++          }
++        });
++
++        if (score > best.score) best = { row: r, score, map };
++      }
++
++      if (best.row < 0 || Object.keys(best.map).length < 3) {
++        throw new Error('Не удалось распознать строку заголовков. Проверьте названия столбцов.');
++      }
++      return best;
++    }
++
++    function parseWorkbookFile(file) {
++      return new Promise((resolve, reject) => {
++        const reader = new FileReader();
++        reader.onerror = () => reject(new Error('Не удалось прочитать файл ' + file.name));
++        reader.onload = () => {
++          try {
++            const wb = XLSX.read(reader.result, { type: 'array', cellText: false, cellDates: true });
++            const firstSheetName = wb.SheetNames[0];
++            if (!firstSheetName) throw new Error('В файле нет листов: ' + file.name);
++            const sheet = wb.Sheets[firstSheetName];
++            const rows = extractSheetRows(sheet);
++            const header = findHeaderRow(rows);
++
++            let lastDepartment = '';
++            const records = [];
++            for (let r = header.row + 1; r < rows.length; r++) {
++              const line = rows[r];
++              const dep = normalizeText(line[header.map.department]);
++              const role = normalizeText(line[header.map.role]);
++              const person = normalizeText(line[header.map.person]);
++              const note = normalizeText(line[header.map.note]);
++              const rateRaw = header.map.rate != null ? line[header.map.rate] : '';
++              const rate = parseRate(rateRaw);
++
++              if (!dep && !role && !person && !note && !rate) continue;
++
++              const department = dep || lastDepartment;
++              if (department) lastDepartment = department;
++              const flags = parseFlags(note, role);
++              const vacancy = !person || /вакан|временно вакант|vacan/i.test(person);
++
++              records.push({
++                rowNumber: r + 1,
++                department,
++                role,
++                person,
++                rate,
++                rateRaw: normalizeText(rateRaw),
++                note,
++                flags,
++                vacancy
++              });
++            }
++
++            resolve({
++              fileName: file.name,
++              sheetName: firstSheetName,
++              records
++            });
++          } catch (err) {
++            reject(err);
++          }
++        };
++        reader.readAsArrayBuffer(file);
++      });
++    }
++
++    buildBtn.onclick = async () => {
++      const current = currentInput.files && currentInput.files[0];
++      const future = futureInput.files && futureInput.files[0];
++      if (!current || !future) {
++        setStatus('Нужно выбрать оба файла.', 'error');
++        return;
++      }
++      if (!window.XLSX) {
++        setStatus('XLSX runtime не загружен. Проверьте доступ к unpkg.com.', 'error');
++        return;
++      }
++
++      buildBtn.disabled = true;
++      setStatus('Чтение Excel и подготовка модели…');
++      try {
++        const currentData = await parseWorkbookFile(current);
++        const futureData = await parseWorkbookFile(future);
++        parent.postMessage({
++          pluginMessage: {
++            type: 'build-org-chart',
++            payload: { current: currentData, future: futureData }
++          }
++        }, '*');
++        setStatus('Данные отправлены в runtime. Строим схему…', 'ok');
++      } catch (err) {
++        setStatus('Ошибка: ' + (err && err.message ? err.message : String(err)), 'error');
++      } finally {
++        buildBtn.disabled = false;
++      }
++    };
++
++    cancelBtn.onclick = () => parent.postMessage({ pluginMessage: { type: 'cancel' } }, '*');
++  </script>
++</body>
++</html>
